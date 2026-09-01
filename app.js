@@ -1,0 +1,121 @@
+// إعدادات التطبيق (الراوتس، الاتصال بمانجو).
+// من غير app.listen، عشان يصلح للتشغيل المحلي وعلى Vercel في نفس الوقت.
+// ده باك إند API بحت - مفيهوش أي ملفات ثابتة، الفرونت إند مشروع Vercel منفصل.
+
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
+
+const app = express();
+
+// CORS - اسمح بس لرابط الفرونت إند بتاعك (أو * مؤقتًا وقت التطوير)
+const clientUrls = (process.env.CLIENT_URL || '*')
+  .split(',')
+  .map((u) => u.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: clientUrls.includes('*') ? true : clientUrls,
+}));
+app.use(express.json());
+
+// MongoDB Connection (مع كاش عشان الـ Serverless متعملش اتصال جديد كل مرة)
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/contact_site';
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected && mongoose.connection.readyState === 1) return;
+  await mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+    bufferCommands: false,
+    maxPoolSize: 5,
+  });
+  isConnected = true;
+  console.log('✅ Connected to MongoDB');
+  await initContact();
+}
+
+// نتأكد إن الاتصال شغال قبل أي طلب - بيتعالج هنا بدل ما الطلب يعلّق من غير رسالة
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('❌ MongoDB Error:', err.message);
+    res.status(503).json({ error: 'تعذر الاتصال بقاعدة البيانات، جرب تاني بعد شوية' });
+  }
+});
+
+// Contact Schema
+const contactSchema = new mongoose.Schema({
+  whatsappNumber: { type: String, default: '201000000000' },
+  telegramNumber: { type: String, default: '201000000000' },
+  whatsappActive: { type: Boolean, default: true },
+  telegramActive: { type: Boolean, default: true },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const Contact = mongoose.model('Contact', contactSchema);
+
+// Initialize default contact if none exists
+let contactInitialized = false;
+async function initContact() {
+  if (contactInitialized) return;
+  try {
+    const count = await Contact.countDocuments();
+    if (count === 0) {
+      await Contact.create({});
+      console.log('✅ Default contact created');
+    }
+    contactInitialized = true;
+  } catch (err) {
+    console.error('❌ Could not initialize default contact:', err.message);
+  }
+}
+
+// ==================== API Routes ====================
+
+// Get contact info
+app.get('/api/contact', async (req, res) => {
+  try {
+    const contact = await Contact.findOne().sort({ updatedAt: -1 });
+    if (!contact) {
+      const newContact = await Contact.create({});
+      return res.json(newContact);
+    }
+    res.json(contact);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update contact info
+app.put('/api/contact', async (req, res) => {
+  try {
+    const { whatsappNumber, telegramNumber, whatsappActive, telegramActive } = req.body;
+
+    let contact = await Contact.findOne().sort({ updatedAt: -1 });
+    if (!contact) {
+      contact = new Contact();
+    }
+
+    if (whatsappNumber !== undefined) contact.whatsappNumber = whatsappNumber;
+    if (telegramNumber !== undefined) contact.telegramNumber = telegramNumber;
+    if (whatsappActive !== undefined) contact.whatsappActive = whatsappActive;
+    if (telegramActive !== undefined) contact.telegramActive = telegramActive;
+    contact.updatedAt = new Date();
+
+    await contact.save();
+    res.json(contact);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Health check بسيط
+app.get('/', (req, res) => {
+  res.send('Contact Site API is running...');
+});
+
+module.exports = app;
