@@ -32,9 +32,7 @@ async function connectDB() {
   // (ده بيمنع مشكلة إن كذا طلب يوصلوا في نفس اللحظة على Vercel ويعملوا كذا اتصال مع بعض)
   if (!cachedConnectionPromise) {
     cachedConnectionPromise = mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 15000, // كانت 5 ثواني، رفعتها عشان تدي فرصة للـ cluster لو بيصحى من pause
-      socketTimeoutMS: 20000,
-      connectTimeoutMS: 15000,
+      serverSelectionTimeoutMS: 8000, // لازم تفضل أقل من مهلة الـ function على Vercel (10 ثانية على Hobby)
       bufferCommands: false,
       maxPoolSize: 5,
     }).then((conn) => {
@@ -58,14 +56,7 @@ app.use(async (req, res, next) => {
     next();
   } catch (err) {
     console.error('❌ MongoDB Error:', err.message);
-    // محاولة تانية وأخيرة قبل ما نرجّع خطأ للمستخدم - في حالة إن أول محاولة وقعت بس السيرفر رجع يشتغل بسرعة
-    try {
-      await connectDB();
-      next();
-    } catch (err2) {
-      console.error('❌ MongoDB Error (retry failed):', err2.message);
-      res.status(503).json({ error: 'تعذر الاتصال بقاعدة البيانات، جرب تاني بعد شوية' });
-    }
+    res.status(503).json({ error: 'تعذر الاتصال بقاعدة البيانات، جرب تاني بعد شوية' });
   }
 });
 
