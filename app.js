@@ -22,17 +22,32 @@ app.use(express.json());
 
 // MongoDB Connection (مع كاش عشان الـ Serverless متعملش اتصال جديد كل مرة)
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/contact_site';
-let isConnected = false;
+let cachedConnectionPromise = null;
 
 async function connectDB() {
-  if (isConnected && mongoose.connection.readyState === 1) return;
-  await mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 5000,
-    bufferCommands: false,
-    maxPoolSize: 5,
-  });
-  isConnected = true;
-  console.log('✅ Connected to MongoDB');
+  // لو فيه اتصال شغال فعلاً، ارجع على طول
+  if (mongoose.connection.readyState === 1) return;
+
+  // لو فيه محاولة اتصال شغالة بالفعل، متبدأش واحدة تانية جنبها - استنى نفس المحاولة
+  // (ده بيمنع مشكلة إن كذا طلب يوصلوا في نفس اللحظة على Vercel ويعملوا كذا اتصال مع بعض)
+  if (!cachedConnectionPromise) {
+    cachedConnectionPromise = mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 15000, // كانت 5 ثواني، رفعتها عشان تدي فرصة للـ cluster لو بيصحى من pause
+      socketTimeoutMS: 20000,
+      connectTimeoutMS: 15000,
+      bufferCommands: false,
+      maxPoolSize: 5,
+    }).then((conn) => {
+      console.log('✅ Connected to MongoDB');
+      return conn;
+    }).catch((err) => {
+      // لو فشلت المحاولة، امسح الكاش عشان الطلب اللي بعده يقدر يجرب تاني من الصفر
+      cachedConnectionPromise = null;
+      throw err;
+    });
+  }
+
+  await cachedConnectionPromise;
   await initContact();
 }
 
@@ -43,7 +58,14 @@ app.use(async (req, res, next) => {
     next();
   } catch (err) {
     console.error('❌ MongoDB Error:', err.message);
-    res.status(503).json({ error: 'تعذر الاتصال بقاعدة البيانات، جرب تاني بعد شوية' });
+    // محاولة تانية وأخيرة قبل ما نرجّع خطأ للمستخدم - في حالة إن أول محاولة وقعت بس السيرفر رجع يشتغل بسرعة
+    try {
+      await connectDB();
+      next();
+    } catch (err2) {
+      console.error('❌ MongoDB Error (retry failed):', err2.message);
+      res.status(503).json({ error: 'تعذر الاتصال بقاعدة البيانات، جرب تاني بعد شوية' });
+    }
   }
 });
 
